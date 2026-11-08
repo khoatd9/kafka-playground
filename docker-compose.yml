@@ -1,0 +1,177 @@
+# Local Kafka monitoring lab
+#   Kafka UI    http://localhost:8080
+#   Grafana     http://localhost:3000   (admin / admin)
+#   Prometheus  http://localhost:9090
+#   Brokers from your Mac: localhost:19092,localhost:29092,localhost:39092
+
+x-kafka-common: &kafka-common
+  image: apache/kafka:4.1.0
+  restart: unless-stopped
+  volumes:
+    - ./config/jmx-exporter:/opt/jmx:ro
+  healthcheck:
+    test: ["CMD-SHELL", "KAFKA_OPTS= /opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+    interval: 10s
+    timeout: 10s
+    retries: 12
+    start_period: 20s
+
+x-kafka-env: &kafka-env
+  CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+  KAFKA_PROCESS_ROLES: broker,controller
+  KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka1:9093,2@kafka2:9093,3@kafka3:9093
+  KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+  KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+  KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+  # Durability defaults worth learning: RF=3, min ISR=2 -> survives 1 broker down with acks=all
+  KAFKA_DEFAULT_REPLICATION_FACTOR: 3
+  KAFKA_MIN_INSYNC_REPLICAS: 2
+  KAFKA_NUM_PARTITIONS: 3
+  KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 3
+  KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 2
+  KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+  KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+  # Expose broker JMX metrics in Prometheus format on :7071
+  KAFKA_OPTS: "-javaagent:/opt/jmx/jmx_prometheus_javaagent.jar=7071:/opt/jmx/kafka-broker.yml"
+
+services:
+  kafka1:
+    <<: *kafka-common
+    hostname: kafka1
+    container_name: kafka1
+    ports: ["19092:19092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:19092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka1:9092,EXTERNAL://localhost:19092
+
+  kafka2:
+    <<: *kafka-common
+    hostname: kafka2
+    container_name: kafka2
+    ports: ["29092:29092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 2
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:29092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka2:9092,EXTERNAL://localhost:29092
+
+  kafka3:
+    <<: *kafka-common
+    hostname: kafka3
+    container_name: kafka3
+    ports: ["39092:39092"]
+    environment:
+      <<: *kafka-env
+      KAFKA_NODE_ID: 3
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,EXTERNAL://:39092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka3:9092,EXTERNAL://localhost:39092
+
+  # One-shot: create demo topics, then exit
+  init-topics:
+    image: apache/kafka:4.1.0
+    container_name: init-topics
+    depends_on:
+      kafka1: { condition: service_healthy }
+      kafka2: { condition: service_healthy }
+      kafka3: { condition: service_healthy }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        B=kafka1:9092
+        # retention.ms=1h keeps the always-on synthetic traffic from filling Docker's disk (~1 GB/h otherwise)
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server $$B --create --if-not-exists --topic orders   --partitions 6 --replication-factor 3 --config retention.ms=3600000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server $$B --create --if-not-exists --topic payments --partitions 3 --replication-factor 3 --config retention.ms=3600000
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server $$B --list
+
+  # Steady synthetic traffic: ~200 msg/s to orders, ~50 msg/s to payments
+  producer:
+    image: apache/kafka:4.1.0
+    container_name: producer
+    restart: unless-stopped
+    depends_on:
+      init-topics: { condition: service_completed_successfully }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        P="bootstrap.servers=kafka1:9092,kafka2:9092,kafka3:9092 acks=all linger.ms=5"
+        /opt/kafka/bin/kafka-producer-perf-test.sh --topic payments --num-records 2000000000 --record-size 300 --throughput 50  --producer-props $$P >/dev/null &
+        /opt/kafka/bin/kafka-producer-perf-test.sh --topic orders   --num-records 2000000000 --record-size 500 --throughput 200 --producer-props $$P
+
+  # Consumer group that keeps up. Stop it (docker compose stop consumer) to watch lag grow.
+  consumer:
+    image: apache/kafka:4.1.0
+    container_name: consumer
+    restart: unless-stopped
+    depends_on:
+      init-topics: { condition: service_completed_successfully }
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        B=kafka1:9092,kafka2:9092,kafka3:9092
+        # Forward SIGTERM so consumers leave their group cleanly on "docker compose stop".
+        # Without this they get SIGKILLed and the group stays "Stable" until session.timeout.ms (45s).
+        trap 'kill $$(jobs -p); wait' TERM INT
+        /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server $$B --topic payments --group payments-service >/dev/null &
+        /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server $$B --topic orders   --group orders-service   >/dev/null &
+        wait
+
+  # Clean container for running Kafka CLI tools (see bin/kafka). Brokers can't be used for
+  # this because their KAFKA_OPTS would start a second JMX agent on the same port.
+  tools:
+    image: apache/kafka:4.1.0
+    container_name: kafka-tools
+    entrypoint: ["sleep", "infinity"]
+    working_dir: /opt/kafka/bin
+
+  kafka-ui:
+    image: ghcr.io/kafbat/kafka-ui:v1.3.0
+    container_name: kafka-ui
+    restart: unless-stopped
+    ports: ["8080:8080"]
+    depends_on:
+      kafka1: { condition: service_healthy }
+    environment:
+      DYNAMIC_CONFIG_ENABLED: "true"
+      KAFKA_CLUSTERS_0_NAME: local-lab
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka1:9092,kafka2:9092,kafka3:9092
+      # Kafka UI reads broker metrics from the same JMX-exporter endpoint Prometheus scrapes
+      KAFKA_CLUSTERS_0_METRICS_TYPE: PROMETHEUS
+      KAFKA_CLUSTERS_0_METRICS_PORT: 7071
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:v1.9.0
+    container_name: kafka-exporter
+    restart: unless-stopped
+    depends_on:
+      kafka1: { condition: service_healthy }
+    command:
+      - --kafka.server=kafka1:9092
+      - --kafka.server=kafka2:9092
+      - --kafka.server=kafka3:9092
+      - --kafka.version=3.7.0
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    container_name: prometheus
+    restart: unless-stopped
+    ports: ["9090:9090"]
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./config/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    container_name: grafana
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/kafka-overview.json
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro

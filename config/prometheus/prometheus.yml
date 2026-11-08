@@ -1,0 +1,26 @@
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+rule_files:
+  - /etc/prometheus/alerts.yml
+
+scrape_configs:
+  # Broker internals via the JMX exporter javaagent running inside each broker JVM
+  - job_name: kafka-broker
+    static_configs:
+      - targets: ["kafka1:7071", "kafka2:7071", "kafka3:7071"]
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: "([^:]+):.*"
+        target_label: broker
+        replacement: "$1"
+
+  # Cluster view from a client's perspective: offsets, consumer lag, ISR
+  - job_name: kafka-exporter
+    static_configs:
+      - targets: ["kafka-exporter:9308"]
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

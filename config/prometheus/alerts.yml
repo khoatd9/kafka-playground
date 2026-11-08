@@ -1,0 +1,53 @@
+# Kafka alert rules. See firing alerts at http://localhost:9090/alerts
+# Thresholds are tuned for the lab (short "for:" so drills trigger quickly). Use 5m+ in production.
+groups:
+  - name: kafka
+    rules:
+      - alert: KafkaBrokerDown
+        expr: kafka_brokers < 3 or up{job="kafka-broker"} == 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "A Kafka broker is down ({{ $labels.instance }})"
+
+      - alert: KafkaNoActiveController
+        expr: sum(kafka_controller_kafkacontroller_activecontrollercount) != 1
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "Active controller count is {{ $value }} (must be exactly 1)"
+
+      - alert: KafkaOfflinePartitions
+        expr: max(kafka_controller_kafkacontroller_offlinepartitionscount) > 0
+        for: 0s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value }} partitions have no leader"
+
+      - alert: KafkaUnderReplicatedPartitions
+        expr: sum(kafka_server_replicamanager_underreplicatedpartitions) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $value }} under-replicated partitions"
+
+      - alert: KafkaUnderMinIsr
+        expr: sum(kafka_cluster_partition_underminisr) > 0
+        for: 30s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $value }} partitions below min.insync.replicas - acks=all writes are failing"
+
+      - alert: KafkaConsumerLagGrowing
+        expr: sum by (consumergroup, topic)(kafka_consumergroup_lag) > 1000 and sum by (consumergroup, topic)(delta(kafka_consumergroup_lag[2m])) > 0
+        for: 1m
+        labels: { severity: warning }
+        annotations:
+          summary: "Lag for {{ $labels.consumergroup }} on {{ $labels.topic }} is {{ $value }} and growing"
+
+      - alert: KafkaBrokerSaturated
+        expr: kafka_network_socketserver_networkprocessoravgidlepercent < 0.3
+        for: 2m
+        labels: { severity: warning }
+        annotations:
+          summary: "Network threads on {{ $labels.broker }} are >70% busy"

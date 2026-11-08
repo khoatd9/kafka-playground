@@ -1,0 +1,45 @@
+# JMX -> Prometheus rules for Kafka brokers (loaded by the javaagent on port 7071).
+# Metric names come out lowercase, e.g. kafka_server_brokertopicmetrics_messagesin_total
+lowercaseOutputName: true
+lowercaseOutputLabelNames: true
+rules:
+  # Request handler thread idle ratio (a Meter without 'PerSec' in its name). 1.0 = idle, <0.3 = overloaded
+  - pattern: kafka.server<type=KafkaRequestHandlerPool, name=RequestHandlerAvgIdlePercent><>OneMinuteRate
+    name: kafka_server_kafkarequesthandlerpool_requesthandleravgidlepercent
+    type: GAUGE
+
+  # Request latency percentiles: kafka.network:type=RequestMetrics,name=TotalTimeMs,request=Produce
+  - pattern: kafka.network<type=RequestMetrics, name=(.+), request=(.+)><>(\d+)thPercentile
+    name: kafka_network_requestmetrics_$1
+    type: GAUGE
+    labels: { request: "$2", quantile: "0.$3" }
+  - pattern: kafka.network<type=RequestMetrics, name=(.+), request=(.+)><>Mean
+    name: kafka_network_requestmetrics_$1_mean
+    type: GAUGE
+    labels: { request: "$2" }
+
+  # Rates (Meters) -> counters ending in _total
+  - pattern: kafka.(\w+)<type=(.+), name=(.+)PerSec\w*, (.+)=(.+), (.+)=(.+)><>Count
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+    labels: { "$4": "$5", "$6": "$7" }
+  - pattern: kafka.(\w+)<type=(.+), name=(.+)PerSec\w*, (.+)=(.+)><>Count
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+    labels: { "$4": "$5" }
+  - pattern: kafka.(\w+)<type=(.+), name=(.+)PerSec\w*><>Count
+    name: kafka_$1_$2_$3_total
+    type: COUNTER
+
+  # Gauges
+  - pattern: kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+), (.+)=(.+)><>Value
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels: { "$4": "$5", "$6": "$7" }
+  - pattern: kafka.(\w+)<type=(.+), name=(.+), (.+)=(.+)><>Value
+    name: kafka_$1_$2_$3
+    type: GAUGE
+    labels: { "$4": "$5" }
+  - pattern: kafka.(\w+)<type=(.+), name=(.+)><>Value
+    name: kafka_$1_$2_$3
+    type: GAUGE

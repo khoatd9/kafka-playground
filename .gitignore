@@ -1,0 +1,5 @@
+# Downloaded by scripts/setup.sh (verified by checksum)
+config/jmx-exporter/*.jar
+.DS_Store
+__pycache__/
+.claude/settings.local.json

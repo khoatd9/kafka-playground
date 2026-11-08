@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Run any Kafka CLI tool against the lab, e.g.:
+#   bin/kafka kafka-topics.sh --list
+#   bin/kafka kafka-consumer-groups.sh --describe --group orders-service
+#   bin/kafka kafka-console-producer.sh --topic demo      (interactive: type lines, Ctrl-D to quit)
+# --bootstrap-server is added automatically if you don't pass one.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+[[ $# -ge 1 ]] || { echo "usage: bin/kafka <tool.sh> [args...]"; exit 1; }
+tool="$1"; shift
+# kafka-producer-perf-test.sh takes bootstrap.servers inside --producer-props instead
+if [[ " $* " != *" --bootstrap-server "* && "$tool" != kafka-producer-perf-test.sh ]]; then
+  set -- --bootstrap-server kafka1:9092,kafka2:9092,kafka3:9092 "$@"
+fi
+tty_flag=(); [[ -t 0 ]] || tty_flag=(-T)   # allocate a TTY only when you're typing
+exec docker compose exec "${tty_flag[@]}" tools "/opt/kafka/bin/$tool" "$@"
